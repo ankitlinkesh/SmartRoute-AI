@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Optimized Bus Routes - SmartRoute</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link
+        rel="stylesheet"
+        href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+        crossorigin=""
+    >
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js"></script>
+</head>
+<body class="results-page-body">
+    <div class="container results-container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        <div class="results-alert-stack">
+            {% for category, message in messages %}
+            <div class="results-alert results-alert-{{ category }}">{{ message }}</div>
+            {% endfor %}
+        </div>
+        {% endif %}
+        {% endwith %}
+
+        <header class="results-header">
+            <div>
+                <h1>Optimized Bus Routes</h1>
+                <p class="subtitle">Road-aware OSRM routing and pickup scheduling</p>
+            </div>
+            <div class="header-actions">
+                <a class="btn btn-brand" href="/static/assignments.csv" download>Download Assignments CSV</a>
+                <a class="btn btn-brand-soft" href="{{ url_for('upload') }}">Optimize Again</a>
+                <a class="btn btn-outline-cyan" href="{{ url_for('fleet_page') }}">Fleet Management</a>
+                <a class="btn btn-outline-slate" href="{{ url_for('projects_page') }}">Load Project</a>
+                <button class="btn btn-save" id="saveProjectBtn" type="button">Save Project</button>
+            </div>
+        </header>
+        <section id="saveProjectInlinePanel" class="section-block save-inline-panel interactive-card" hidden>
+            <h3>Save Project</h3>
+            <label for="projectNameInput">Project Name</label>
+            <input id="projectNameInput" type="text" placeholder="Chennai_Morning_Routes">
+            <p id="saveProjectError" class="hint" style="color:#fca5a5;"></p>
+            <div class="manual-actions">
+                <button class="btn btn-save" id="confirmSaveProjectBtn" type="button">Save</button>
+                <button class="btn btn-secondary-dark" id="overwriteSaveProjectBtn" type="button" hidden>Overwrite</button>
+                <button class="btn btn-outline-slate" id="cancelSaveProjectBtn" type="button">Cancel</button>
+            </div>
+        </section>
+
+        <section class="section-block simulation-lab interactive-card motion-reveal reveal-blur">
+            <h2>Route Simulation Lab</h2>
+            <div class="advanced-capacity-grid">
+                <label>
+                    Simulated Occupancy
+                    <input id="simOccupancySlider" type="range" min="50" max="120" step="1" value="90">
+                    <span id="simOccupancyValue">90%</span>
+                </label>
+                <label>
+                    Disable Bus
+                    <select id="simDisableBusSelect">
+                        <option value="">None</option>
+                        {% for bus in buses %}
+                        <option value="{{ bus.bus_number }}">Bus {{ bus.bus_number }}</option>
+                        {% endfor %}
+                    </select>
+                </label>
+                <label class="overflow-toggle-wrap">
+                    <span>Overflow</span>
+                    <input id="simOverflowToggle" type="checkbox">
+                </label>
+                <label>
+                    Overflow Limit
+                    <input id="simOverflowLimit" type="number" min="0" value="0">
+                </label>
+                <button class="btn" id="runSimulationBtn" type="button">Run Simulation</button>
+            </div>
+            <div class="table-wrap" style="margin-top: 12px;">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Metric</th>
+                            <th>Current</th>
+                            <th>Simulated</th>
+                        </tr>
+                    </thead>
+                    <tbody id="simulationCompareBody">
+                        <tr><td>Buses Used</td><td id="simCurrentBuses">{{ total_buses_used }}</td><td id="simResultBuses">-</td></tr>
+                        <tr><td>Avg Time (min)</td><td id="simCurrentAvgTime">{{ average_travel_duration }}</td><td id="simResultAvgTime">-</td></tr>
+                        <tr><td>Overflow</td><td id="simCurrentOverflow">0</td><td id="simResultOverflow">-</td></tr>
+                        <tr><td>Unassigned</td><td id="simCurrentUnassigned">0</td><td id="simResultUnassigned">-</td></tr>
+                        <tr><td>Distance (km)</td><td id="simCurrentDistance">{{ total_route_distance }}</td><td id="simResultDistance">-</td></tr>
+                        <tr><td>Healthy Routes</td><td id="simCurrentHealthy">{{ quality_metrics.global.healthy_route_count }}</td><td id="simResultHealthy">-</td></tr>
+                        <tr><td>Caution Routes</td><td id="simCurrentCaution">{{ quality_metrics.global.caution_route_count }}</td><td id="simResultCaution">-</td></tr>
+                        <tr><td>Severe Routes</td><td id="simCurrentSevere">{{ quality_metrics.global.severe_route_count }}</td><td id="simResultSevere">-</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div id="simulationWarnings" class="overflow-suggestion"></div>
+        </section>
+
+        {% if upload_summary and upload_summary.uploaded_files %}
+        <section class="section-block upload-summary-section">
+            <h2>Upload Summary</h2>
+            <div class="summary-grid">
+                <div class="summary-card highlight-card interactive-card motion-reveal reveal-scale">
+                    <h3>Uploaded Files</h3>
+                    <p class="metric-value">{{ upload_summary.uploaded_files }}</p>
+                </div>
+                <div class="summary-card highlight-card interactive-card motion-reveal reveal-scale">
+                    <h3>Total Students</h3>
+                    <p class="metric-value">{{ upload_summary.total_students }}</p>
+                </div>
+                <div class="summary-card interactive-card motion-reveal reveal-scale">
+                    <h3>Invalid Rows Removed</h3>
+                    <p>{{ upload_summary.invalid_rows_removed }}</p>
+                </div>
+                <div class="summary-card interactive-card motion-reveal reveal-scale">
+                    <h3>Duplicate Students Removed</h3>
+                    <p>{{ upload_summary.duplicate_students_removed }}</p>
+                </div>
+            </div>
+        </section>
+        {% endif %}
+
+        <section class="section-block">
+            <h2>Route Summary</h2>
+            <div class="summary-grid">
+                <div class="summary-card highlight-card interactive-card motion-reveal reveal-scale">
+                    <h3>Total Buses Used</h3>
+                    <p class="metric-value">{{ total_buses_used }}</p>
+                </div>
+                <div class="summary-card highlight-card interactive-card motion-reveal reveal-scale">
+                    <h3>Average Travel Time</h3>
+                    <p class="metric-value">{{ average_travel_duration }} min</p>
+                </div>
+                <div class="summary-card highlight-card interactive-card motion-reveal reveal-scale">
+                    <h3>Total Route Distance</h3>
+                    <p class="metric-value">{{ total_route_distance }} km</p>
+                </div>
+                <div class="summary-card interactive-card motion-reveal reveal-scale">
+                    <h3>Average Distance</h3>
+                    <p>{{ average_travel_distance }} km</p>
+                </div>
+                <div class="summary-card interactive-card motion-reveal reveal-scale">
+                    <h3>Matrix Source</h3>
+                    <p>{{ matrix_source | upper }}</p>
+                </div>
+                <div class="summary-card interactive-card motion-reveal reveal-scale">
+                    <h3>Stop Source</h3>
+                    <p>{{ stop_source | upper }}</p>
+                </div>
+                <div class="summary-card interactive-card motion-reveal reveal-scale">
+                    <h3>Candidate Stops</h3>
+                    <p>{{ total_candidate_stops }}</p>
+                </div>
+                <div class="summary-card interactive-card motion-reveal reveal-scale">
+                    <h3>Planned Capacity</h3>
+                    <p>{{ capacity_profile.planned_capacity }}</p>
+                </div>
+                <div class="summary-card interactive-card motion-reveal reveal-scale">
+                    <h3>Overflow Capacity</h3>
+                    <p>+{{ capacity_profile.overflow_capacity }}</p>
+                </div>
+                <div class="summary-card interactive-card motion-reveal reveal-scale">
+                    <h3>Effective Usable Capacity</h3>
+                    <p>{{ capacity_profile.usable_capacity }}</p>
+                </div>
+                <div class="summary-card interactive-card motion-reveal reveal-scale">
+                    <h3>Bus Reduction</h3>
+                    <p>{% if bus_reduction_from_overflow > 0 %}Overflow enabled saved {{ bus_reduction_from_overflow }} bus{% if bus_reduction_from_overflow != 1 %}es{% endif %}{% else %}0{% endif %}</p>
+                </div>
+                <div class="summary-card interactive-card motion-reveal reveal-scale">
+                    <h3>Route Efficiency Score</h3>
+                    <p>{{ quality_metrics.global.route_efficiency_score }}</p>
+                </div>
+                <div class="summary-card interactive-card motion-reveal reveal-scale">
+                    <h3>Total Overlap Score</h3>
+                    <p>{{ quality_metrics.global.total_overlap_score }}</p>
+                </div>
+                <div class="summary-card interactive-card motion-reveal reveal-scale">
+                    <h3>Longest Ride Duration</h3>
+                    <p>{{ quality_metrics.global.longest_ride_duration }} min</p>
+                </div>
+                <div class="summary-card interactive-card motion-reveal reveal-scale">
+                    <h3>Healthy Routes</h3>
+                    <p>{{ quality_metrics.global.healthy_route_count }}</p>
+                </div>
+                <div class="summary-card interactive-card motion-reveal reveal-scale">
+                    <h3>Caution Routes</h3>
+                    <p>{{ quality_metrics.global.caution_route_count }}</p>
+                </div>
+                <div class="summary-card interactive-card motion-reveal reveal-scale">
+                    <h3>Severe Routes</h3>
+                    <p>{{ quality_metrics.global.severe_route_count }}</p>
+                </div>
+                <div class="summary-card interactive-card motion-reveal reveal-scale">
+                    <h3>Max Ride Duration Constraint</h3>
+                    <p>{{ configured_max_ride_duration_label }}</p>
+                </div>
+                <div class="summary-card interactive-card motion-reveal reveal-scale">
+                    <h3>Stop Dwell Time Constraint</h3>
+                    <p>{{ configured_stop_dwell_seconds_label }}</p>
+                </div>
+            </div>
+        </section>
+
+        {% if warnings %}
+        <div class="warning-box">
+            {% for warning in warnings %}
+            <p>{{ warning }}</p>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        {% if quality_metrics.per_bus %}
+        <section class="section-block">
+            <h2>Route Quality Breakdown</h2>
+            <div class="summary-grid">
+                {% for route in quality_metrics.per_bus %}
+                <article class="summary-card interactive-card motion-reveal reveal-scale route-quality-card route-quality-{{ route.health }}">
+                    <div class="quality-card-head">
+                        <h3>Bus {{ route.bus_number }}</h3>
+                        <span class="quality-status quality-status-{{ route.health }}">{{ route.status_label }}</span>
+                    </div>
+                    <p><strong>Health Score:</strong> {{ route.health_score }}</p>
+                    <p><strong>Primary Reason:</strong> {{ route.primary_reason }}</p>
+                    <details class="quality-details">
+                        <summary>View Quality Details</summary>
+                        <p><strong>Ride Duration:</strong> {{ route.estimated_ride_duration_min }} min</p>
+                        <p><strong>Compactness:</strong> {{ route.compactness }}</p>
+                        <p><strong>Overlap:</strong> {{ route.overlap_score }}</p>
+                        <p><strong>Avg Stop Spacing:</strong> {{ route.average_stop_spacing_km }} km</p>
+                        <p><strong>Occupancy:</strong> {{ route.occupancy_ratio }}%</p>
+                        <p><strong>Detour Index:</strong> {{ route.detour_index }}</p>
+                        {% if route.warnings %}
+                        <div class="quality-warning-list">
+                            {% for item in route.warnings %}
+                            <p>{{ item }}</p>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <p>No notable quality warnings.</p>
+                        {% endif %}
+                    </details>
+                </article>
+                {% endfor %}
+            </div>
+        </section>
+        {% endif %}
+
+        {% if buses %}
+        <section class="section-block manual-controls-panel interactive-card motion-reveal reveal-blur">
+            <div class="manual-controls-header">
+                <h2>Admin Control Panel</h2>
+                <div class="manual-actions">
+                    <button class="btn" id="modeToggleBtn" type="button" data-manual="false">Manual Edit Mode</button>
+                    <button class="btn btn-secondary-dark" id="undoBtn" type="button" disabled>Undo</button>
+                    <button class="btn btn-secondary-dark" id="redoBtn" type="button" disabled>Redo</button>
+                    <button class="btn btn-secondary-dark" id="savePlanBtn" type="button">Save Route Plan</button>
+                    <button class="btn btn-secondary-dark" id="loadPlanBtn" type="button">Load Route Plan</button>
+                    <button class="btn btn-secondary-dark" id="exportJsonBtn" type="button">Export JSON</button>
+                    <button class="btn btn-secondary-dark" id="exportCsvBtn" type="button">Export CSV</button>
+                    <button class="btn btn-secondary-dark" id="printPdfBtn" type="button">Printable PDF</button>
+                    <input id="routePlanFileInput" type="file" accept=".json" hidden>
+                </div>
+            </div>
+
+            <div class="advanced-capacity-controls">
+                <h3>Advanced Capacity Controls</h3>
+                <div class="advanced-capacity-grid">
+                    <label>
+                        Planned Occupancy
+                        <input id="occupancySlider" type="range" min="50" max="120" step="1" value="90">
+                        <span id="occupancyValue">90%</span>
+                    </label>
+                    <label class="overflow-toggle-wrap">
+                        <span>Enable Overflow Mode</span>
+                        <input id="overflowModeToggle" type="checkbox">
+                    </label>
+                    <label>
+                        Max Overflow Per Bus
+                        <input id="overflowLimitInput" type="number" min="0" value="0">
+                    </label>
+                </div>
+
+                <div class="capacity-preview-box">
+                    <p>Actual Bus Capacity: <strong id="previewActualCapacity">0</strong></p>
+                    <p>Planned Occupancy: <strong id="previewPlannedOccupancy">90%</strong></p>
+                    <p>Planned Seats Used: <strong id="previewPlannedSeats">0</strong></p>
+                    <p>Manual Overflow Allowed: <strong id="previewOverflowAllowed">+0</strong></p>
+                    <p>Maximum Allowed Students: <strong id="previewMaxAllowed">0</strong></p>
+                </div>
+
+                <div id="overflowSafetyWarning" class="overflow-warning" hidden></div>
+                <div id="overflowSuggestion" class="overflow-suggestion"></div>
+            </div>
+
+            <div class="summary-grid manual-summary-grid">
+                <div class="summary-card"><h3>Total Buses</h3><p id="ctrlTotalBuses">{{ total_buses_used }}</p></div>
+                <div class="summary-card"><h3>Overloaded Buses</h3><p id="ctrlOverloadedBuses">0</p></div>
+                <div class="summary-card"><h3>Unassigned Students</h3><p id="ctrlUnassignedStudents">0</p></div>
+                <div class="summary-card"><h3>Locked Stops</h3><p id="ctrlLockedStops">0</p></div>
+                <div class="summary-card"><h3>Manual Overrides</h3><p id="ctrlManualOverrides">0</p></div>
+                <div class="summary-card"><h3>Total Overflow Passengers</h3><p id="ctrlTotalOverflowPassengers">0</p></div>
+                <div class="summary-card"><h3>Buses Using Overflow</h3><p id="ctrlBusesUsingOverflow">0</p></div>
+                <div class="summary-card"><h3>Overload Percentage</h3><p id="ctrlOverloadPercentage">0%</p></div>
+                <div class="summary-card"><h3>Unused Capacity</h3><p id="ctrlUnusedCapacity">0</p></div>
+                <div class="summary-card"><h3>Healthy Routes</h3><p id="ctrlHealthyRoutes">{{ quality_metrics.global.healthy_route_count }}</p></div>
+                <div class="summary-card"><h3>Caution Routes</h3><p id="ctrlCautionRoutes">{{ quality_metrics.global.caution_route_count }}</p></div>
+                <div class="summary-card"><h3>Severe Routes</h3><p id="ctrlSevereRoutes">{{ quality_metrics.global.severe_route_count }}</p></div>
+            </div>
+
+            <div class="manual-add-stop">
+                <h3>Add Custom Stop</h3>
+                <div class="manual-add-stop-grid">
+                    <input id="newStopName" type="text" placeholder="Stop name">
+                    <input id="newStopLat" type="number" step="0.000001" placeholder="Latitude">
+                    <input id="newStopLon" type="number" step="0.000001" placeholder="Longitude">
+                    <select id="newStopBus"></select>
+                    <button class="btn" id="addStopBtn" type="button">Add Stop</button>
+                </div>
+                <p class="hint">In Manual Edit Mode, you can also click the map to add a stop and drag stop markers to move them.</p>
+            </div>
+        </section>
+
+        <section class="section-block">
+            <h2>Student Assignments (Editable)</h2>
+            <div class="table-wrap motion-reveal reveal-blur">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Student</th>
+                            <th>Current Stop</th>
+                            <th>Bus</th>
+                            <th>Pickup Time</th>
+                            <th>Source File</th>
+                            <th>Reassign Stop</th>
+                        </tr>
+                    </thead>
+                    <tbody id="manualAssignmentsBody">
+                        {% for item in assignments[:120] %}
+                        <tr>
+                            <td>{{ item.student_name }}</td>
+                            <td>{{ item.stop_name }}</td>
+                            <td>{{ item.bus_number }}</td>
+                            <td>{{ item.pickup_time }}</td>
+                            <td>{{ item.source_file }}</td>
+                            <td><em>Enable Manual Edit Mode</em></td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <p class="hint">Showing up to 400 students for interactive editing. Use CSV/JSON export for full assignment output.</p>
+        </section>
+
+        <section class="dashboard-split">
+            <div class="map-pane interactive-card motion-reveal reveal-blur" style="border-radius: 20px; overflow: hidden; border: 1px solid rgba(0,255,255,0.15);">
+                <div id="map"></div>
+            </div>
+
+            <div class="details-pane">
+                <div id="manualRouteEditor"></div>
+                <div id="staticBusCards" class="static-fallback-cards">
+                    {% for bus in buses %}
+                    <article class="bus-card route-card interactive-card motion-reveal reveal-up">
+                        <h2>Bus {{ bus.bus_number }}</h2>
+                        <p><strong>Total Students:</strong> {{ bus.total_students }}</p>
+                        <p><strong>Actual Capacity:</strong> {{ bus.actual_capacity or configured_bus_capacity }}</p>
+                        <p><strong>Arrival Time:</strong> {{ bus.arrival_time }}</p>
+                        <p><strong>Route Distance:</strong> {{ bus.route_distance_km }} km</p>
+                        <p><strong>Route Duration:</strong> {{ bus.route_duration_min }} min</p>
+                        <p><strong>Boarding Time:</strong> {{ bus.boarding_duration_min }} min</p>
+                    </article>
+                    {% endfor %}
+                </div>
+            </div>
+        </section>
+        {% else %}
+        <section class="no-routes-state">
+            <h2>No routes could be generated.</h2>
+            <p>Try adjusting bus count, capacity, or stop source and run optimization again.</p>
+            <a class="btn" href="{{ url_for('upload') }}">Go Back to Upload</a>
+        </section>
+        {% endif %}
+    </div>
+
+    <script
+        src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+        crossorigin=""
+    ></script>
+    <script src="{{ url_for('static', filename='js/state/store.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/state/mapState.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/map/routeLayerManager.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/map/stopLayerManager.js') }}"></script>
+    <script>
+        window.SMARTROUTE_RESULTS = {
+            mapData: {{ map_data | tojson }},
+            buses: {{ buses | tojson }},
+            assignments: {{ assignments | tojson }},
+            routesPerPage: {{ routes_per_page | tojson }},
+            collegeName: {{ college_name | tojson }},
+            configuredBusCapacity: {{ configured_bus_capacity | tojson }},
+            configuredPerBusCapacities: {{ configured_per_bus_capacities | tojson }},
+            configuredRoutingPolicy: {{ configured_routing_policy | tojson }},
+            configuredMaxRideDuration: {{ configured_max_ride_duration | tojson }},
+            configuredStopDwellSeconds: {{ configured_stop_dwell_seconds | tojson }},
+            configuredMaxRideDurationLabel: {{ configured_max_ride_duration_label | tojson }},
+            configuredStopDwellSecondsLabel: {{ configured_stop_dwell_seconds_label | tojson }},
+            uploadSummary: {{ upload_summary | tojson }},
+            mergedStudents: {{ merged_students | tojson }},
+            projectMeta: {{ project_meta | tojson }},
+            manualPlanState: {{ manual_plan_state | tojson }},
+            configuredArrivalTime: {{ configured_arrival_time | tojson }},
+            capacityProfile: {{ capacity_profile | tojson }},
+            metrics: {
+                total_buses_used: {{ total_buses_used | tojson }},
+                average_travel_duration: {{ average_travel_duration | tojson }},
+                average_travel_distance: {{ average_travel_distance | tojson }},
+                total_route_distance: {{ total_route_distance | tojson }},
+                total_candidate_stops: {{ total_candidate_stops | tojson }},
+                matrix_source: {{ matrix_source | tojson }},
+                stop_source: {{ stop_source | tojson }},
+                required_buses_without_overflow: {{ required_buses_without_overflow | tojson }},
+                required_buses_with_current_capacity: {{ required_buses_with_current_capacity | tojson }},
+                bus_reduction_from_overflow: {{ bus_reduction_from_overflow | tojson }},
+                quality_metrics: {{ quality_metrics | tojson }}
+            }
+        };
+    </script>
+
+    <script src="{{ url_for('static', filename='main.js') }}"></script>
+</body>
+</html>

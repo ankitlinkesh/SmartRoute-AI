@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Saved Projects - SmartRoute AI</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body class="results-page-body">
+    <div class="container results-container">
+        <header class="results-header">
+            <div>
+                <h1>Saved Projects</h1>
+                <p class="subtitle">Load previous route plans and continue dispatch operations.</p>
+            </div>
+            <div class="header-actions">
+                <a class="btn" href="{{ url_for('upload') }}">New Optimization</a>
+                <a class="btn btn-secondary-dark" href="{{ url_for('fleet_page') }}">Fleet Management</a>
+            </div>
+        </header>
+
+        <section class="section-block">
+            <div class="summary-grid">
+                {% for project in projects %}
+                <article class="summary-card interactive-card motion-reveal reveal-scale">
+                    <h3>{{ project.project_name }}</h3>
+                    <p>Created: {{ project.created_date }}</p>
+                    <p>Students: {{ project.total_students }}</p>
+                    <p>Buses: {{ project.total_buses }}</p>
+                    <p>Occupancy: {{ project.occupancy_percent }}%</p>
+                    <p>Overflow: {{ project.overflow_status }}</p>
+                    <a class="btn" href="{{ project.load_url }}">Load Project</a>
+                </article>
+                {% else %}
+                <article class="summary-card">
+                    <h3>No saved projects yet</h3>
+                    <p>Create a route plan, then save it from the results page.</p>
+                </article>
+                {% endfor %}
+            </div>
+        </section>
+    </div>
+</body>
+</html>

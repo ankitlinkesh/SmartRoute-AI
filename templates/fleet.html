@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fleet Management - SmartRoute AI</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body class="results-page-body">
+    <div class="container results-container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        <div class="results-alert-stack">
+            {% for category, message in messages %}
+            <div class="results-alert results-alert-{{ category }}">{{ message }}</div>
+            {% endfor %}
+        </div>
+        {% endif %}
+        {% endwith %}
+
+        <header class="results-header">
+            <div>
+                <h1>Fleet Management</h1>
+                <p class="subtitle">Manage bus lifecycle, renewals, and service readiness.</p>
+            </div>
+            <div class="header-actions">
+                <a class="btn btn-brand-soft" href="{{ url_for('upload') }}">Route Optimization</a>
+                <a class="btn btn-outline-slate" href="{{ url_for('projects_page') }}">Saved Projects</a>
+                <a class="btn btn-outline-cyan" href="{{ url_for('index') }}">Back to Home</a>
+            </div>
+        </header>
+
+        <section class="section-block">
+            <div class="summary-grid">
+                <article class="summary-card highlight-card"><h3>Total Buses</h3><p class="metric-value">{{ summary.total_buses }}</p></article>
+                <article class="summary-card"><h3>Expiring Insurance</h3><p>{{ summary.expiring_insurance }}</p></article>
+                <article class="summary-card"><h3>Expiring FC</h3><p>{{ summary.expiring_fc }}</p></article>
+                <article class="summary-card"><h3>Expiring Tax</h3><p>{{ summary.expiring_tax }}</p></article>
+                <article class="summary-card"><h3>Service Due Soon</h3><p>{{ summary.service_due_soon }}</p></article>
+            </div>
+        </section>
+
+        <section class="section-block">
+            <div class="manual-actions">
+                <a class="btn {% if active_filter == 'all' %}btn{% else %}btn btn-secondary-dark{% endif %}" href="{{ url_for('fleet_page', filter='all') }}">All Buses</a>
+                <a class="btn {% if active_filter == 'expiring' %}btn{% else %}btn btn-secondary-dark{% endif %}" href="{{ url_for('fleet_page', filter='expiring') }}">Expiring Soon</a>
+                <a class="btn {% if active_filter == 'expired' %}btn{% else %}btn btn-secondary-dark{% endif %}" href="{{ url_for('fleet_page', filter='expired') }}">Expired</a>
+                <a class="btn {% if active_filter == 'healthy' %}btn{% else %}btn btn-secondary-dark{% endif %}" href="{{ url_for('fleet_page', filter='healthy') }}">Healthy</a>
+            </div>
+        </section>
+
+        <section class="section-block manual-controls-panel interactive-card">
+            <h2>Add Bus</h2>
+            <form method="POST" action="{{ url_for('fleet_page', filter=active_filter) }}" class="manual-add-stop-grid fleet-form-grid">
+                <input type="hidden" name="action" value="add">
+                <input type="number" name="bus_number" min="1" placeholder="Bus Number" required>
+                <input type="text" name="registration_number" placeholder="Registration Number" required>
+                <input type="number" name="seating_capacity" min="1" placeholder="Seating Capacity" required>
+                <input type="date" name="last_service_date">
+                <input type="date" name="next_service_due">
+                <input type="date" name="insurance_last_renewed">
+                <input type="date" name="insurance_expiry">
+                <input type="date" name="fc_last_done">
+                <input type="date" name="fc_expiry">
+                <input type="date" name="tax_last_paid">
+                <input type="date" name="tax_expiry">
+                <input type="text" name="notes" placeholder="Notes">
+                <button class="btn" type="submit">Add Bus</button>
+            </form>
+        </section>
+
+        <section class="section-block">
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Bus</th>
+                            <th>Registration</th>
+                            <th>Capacity</th>
+                            <th>Service</th>
+                            <th>Insurance</th>
+                            <th>FC</th>
+                            <th>Tax</th>
+                            <th>Notes</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in rows %}
+                        <tr>
+                            <form method="POST" action="{{ url_for('fleet_page', filter=active_filter) }}" class="fleet-row-form">
+                                <input type="hidden" name="bus_number" value="{{ row.bus_number }}">
+                                <td>Bus {{ row.bus_number }}</td>
+                                <td><input type="text" name="registration_number" value="{{ row.registration_number }}"></td>
+                                <td><input type="number" name="seating_capacity" min="1" value="{{ row.seating_capacity }}"></td>
+                                <td>
+                                    <input type="date" name="last_service_date" value="{{ row.last_service_date }}">
+                                    <input type="date" name="next_service_due" value="{{ row.next_service_due }}">
+                                    <span class="fleet-pill fleet-{{ row.service_status }}">{% if row.service_days is not none %}{{ row.service_days }}d{% else %}N/A{% endif %}</span>
+                                </td>
+                                <td>
+                                    <input type="date" name="insurance_last_renewed" value="{{ row.insurance_last_renewed }}">
+                                    <input type="date" name="insurance_expiry" value="{{ row.insurance_expiry }}">
+                                    <span class="fleet-pill fleet-{{ row.insurance_status }}">{% if row.insurance_days is not none %}{{ row.insurance_days }}d{% else %}N/A{% endif %}</span>
+                                </td>
+                                <td>
+                                    <input type="date" name="fc_last_done" value="{{ row.fc_last_done }}">
+                                    <input type="date" name="fc_expiry" value="{{ row.fc_expiry }}">
+                                    <span class="fleet-pill fleet-{{ row.fc_status }}">{% if row.fc_days is not none %}{{ row.fc_days }}d{% else %}N/A{% endif %}</span>
+                                </td>
+                                <td>
+                                    <input type="date" name="tax_last_paid" value="{{ row.tax_last_paid }}">
+                                    <input type="date" name="tax_expiry" value="{{ row.tax_expiry }}">
+                                    <span class="fleet-pill fleet-{{ row.tax_status }}">{% if row.tax_days is not none %}{{ row.tax_days }}d{% else %}N/A{% endif %}</span>
+                                </td>
+                                <td><input type="text" name="notes" value="{{ row.notes }}"></td>
+                                <td class="manual-actions">
+                                    <button class="btn btn-secondary-dark" type="submit" name="action" value="edit">Edit Bus</button>
+                                    <button class="btn btn-secondary-dark" type="submit" name="action" value="delete" onclick="return confirm('Delete this bus?')">Delete Bus</button>
+                                </td>
+                            </form>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan="9">No buses found for this filter.</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </div>
+</body>
+</html>

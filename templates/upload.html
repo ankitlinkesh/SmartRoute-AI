@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Upload Student Data - SmartRoute AI</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body class="upload-page-body">
+    <div id="uploadLoadingOverlay" class="upload-loading-overlay" aria-hidden="true">
+        <div class="upload-loading-card">
+            <div class="orbital-loader" role="status" aria-live="polite" aria-label="Optimizing routes">
+                <span class="orb-dot"></span>
+                <span class="orb-dot"></span>
+                <span class="orb-dot"></span>
+                <span class="orb-dot"></span>
+                <span class="orb-dot"></span>
+                <span class="orb-dot"></span>
+                <span class="orb-dot"></span>
+                <span class="orb-dot"></span>
+            </div>
+            <p class="upload-loading-title">Optimizing Routes...</p>
+            <p class="upload-loading-subtitle">Generating efficient corridor-aware assignments</p>
+        </div>
+    </div>
+    <div class="upload-bg-grid"></div>
+    <div class="upload-bg-glow"></div>
+
+    <div class="upload-shell">
+        <div class="upload-head">
+            <p class="upload-kicker">SmartRoute AI</p>
+            <h1>Upload Student Data</h1>
+            <p class="upload-subtitle">A 5-minute fix for transportation and logistical nightmares.</p>
+        </div>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        <div class="upload-alert-stack">
+            {% for category, message in messages %}
+            <div class="upload-alert upload-alert-{{ category }}">
+                {{ message }}
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+        {% endwith %}
+
+        <form method="POST" action="/upload" enctype="multipart/form-data" class="upload-form-card" id="upload-form">
+            <label for="files">Student CSV Files</label>
+            <input id="files" type="file" name="files" multiple accept=".csv" required>
+
+            <label for="num_buses">Number of Buses</label>
+            <input id="num_buses" name="num_buses" type="number" min="1" value="{{ bus_count_value or '' }}" required>
+
+            <label for="capacity_per_bus">Capacity Per Bus</label>
+            <input id="capacity_per_bus" name="capacity_per_bus" type="number" min="1" value="{{ capacity_value or '' }}" required>
+
+            <label for="per_bus_capacities">Per-Bus Capacities (Optional)</label>
+            <input
+                id="per_bus_capacities"
+                name="per_bus_capacities"
+                type="text"
+                value="{{ per_bus_capacities_value or '' }}"
+                placeholder="1:40, 2:52, 3:35"
+            >
+
+            <label for="arrival_time">Arrival Time</label>
+            <input id="arrival_time" name="arrival_time" type="time" value="{{ arrival_time_value or '08:30' }}" required>
+
+            <label for="occupancy_percent">Occupancy %</label>
+            <input id="occupancy_percent" name="occupancy_percent" type="number" min="1" max="150" value="{{ occupancy_value or '90' }}" required>
+
+            <label class="overflow-toggle-wrap" for="overflow_enabled">
+                <span>Enable Overflow In Initial Allocation</span>
+                <input id="overflow_enabled" name="overflow_enabled" type="checkbox" {% if overflow_enabled_value %}checked{% endif %}>
+            </label>
+
+            <label for="overflow_limit">Overflow Limit Per Bus</label>
+            <input id="overflow_limit" name="overflow_limit" type="number" min="0" value="{{ overflow_limit_value or '0' }}" required>
+
+            <label for="max_ride_duration_minutes">Max Ride Duration (minutes)</label>
+            <select id="max_ride_duration_minutes" name="max_ride_duration_minutes" required>
+                <option value="none" {% if (max_ride_duration_value|string|lower) in ["none", "null", ""] %}selected{% endif %}>- No Constraints -</option>
+                <option value="45" {% if max_ride_duration_value == "45" %}selected{% endif %}>45 min</option>
+                <option value="60" {% if max_ride_duration_value == "60" %}selected{% endif %}>60 min</option>
+                <option value="90" {% if max_ride_duration_value == "90" %}selected{% endif %}>90 min</option>
+                <option value="120" {% if max_ride_duration_value == "120" %}selected{% endif %}>120 min</option>
+                <option value="150" {% if max_ride_duration_value == "150" %}selected{% endif %}>150 min</option>
+                <option value="180" {% if max_ride_duration_value == "180" %}selected{% endif %}>180 min</option>
+            </select>
+
+            <label for="stop_dwell_seconds">Stop Dwell Time (seconds)</label>
+            <select id="stop_dwell_seconds" name="stop_dwell_seconds" required>
+                <option value="none" {% if (stop_dwell_seconds_value|string|lower) in ["none", "null", ""] %}selected{% endif %}>- No Constraints -</option>
+                <option value="0" {% if stop_dwell_seconds_value == "0" %}selected{% endif %}>0 sec</option>
+                <option value="10" {% if stop_dwell_seconds_value == "10" %}selected{% endif %}>10 sec</option>
+                <option value="20" {% if stop_dwell_seconds_value == "20" %}selected{% endif %}>20 sec</option>
+                <option value="30" {% if stop_dwell_seconds_value == "30" %}selected{% endif %}>30 sec</option>
+                <option value="45" {% if stop_dwell_seconds_value == "45" %}selected{% endif %}>45 sec</option>
+                <option value="60" {% if stop_dwell_seconds_value == "60" %}selected{% endif %}>1 min</option>
+                <option value="90" {% if stop_dwell_seconds_value == "90" %}selected{% endif %}>1 min 30 sec</option>
+                <option value="120" {% if stop_dwell_seconds_value == "120" %}selected{% endif %}>2 min</option>
+            </select>
+
+            <label for="stop_source">Stop Source</label>
+            <select id="stop_source" name="stop_source">
+                <option value="mtc" {% if default_stop_source == "mtc" %}selected{% endif %}>Chennai MTC Stops</option>
+                <option value="500m" {% if default_stop_source == "500m" %}selected{% endif %}>500m Rule</option>
+            </select>
+
+            <label for="routing_policy">Routing Policy</label>
+            <select id="routing_policy" name="routing_policy">
+                {% for policy_key, policy_label in routing_policy_options.items() %}
+                <option value="{{ policy_key }}" {% if routing_policy_value == policy_key %}selected{% endif %}>{{ policy_label }}</option>
+                {% endfor %}
+            </select>
+
+            <button type="submit" id="generateBtn" class="upload-submit-btn">
+                <span class="btn-label">Generate Routes</span>
+                <span class="btn-loading">
+                    <span class="spinner"></span>
+                    Processing...
+                </span>
+            </button>
+        </form>
+
+        <div class="upload-hints">
+            <p>CSV columns supported: <code>name</code>/<code>student_name</code>, <code>latitude</code>/<code>lat</code>, <code>longitude</code>/<code>lon</code>/<code>lng</code></p>
+            <p>Routing uses public OSRM at <code>https://router.project-osrm.org</code>; no local OSRM server is required.</p>
+            <a class="upload-home-link" href="{{ url_for('fleet_page') }}">Fleet Management</a>
+            <a class="upload-home-link" href="{{ url_for('index') }}">Back to Home</a>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='main.js') }}"></script>
+    <script>
+    document.querySelector("#upload-form").addEventListener("submit", function () {
+        const btn = document.getElementById("generateBtn");
+        const overlay = document.getElementById("uploadLoadingOverlay");
+        btn.disabled = true;
+        btn.classList.add("is-loading");
+        if (overlay) {
+            overlay.classList.add("is-active");
+            overlay.setAttribute("aria-hidden", "false");
+            document.body.classList.add("upload-loading-lock");
+        }
+    });
+    </script>
+</body>
+</html>

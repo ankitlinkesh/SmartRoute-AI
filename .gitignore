@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Flask/runtime
+instance/
+.webassets-cache/
+*.log
+logs/
+
+# Build/test caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# OS/Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Project runtime artifacts
+projects/
+static/assignments.csv
+
+# Generated data exports
+*.tmp
+*.bak
+*.pid
+
+# Optional notebooks
+.ipynb_checkpoints/
