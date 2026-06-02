@@ -158,7 +158,7 @@ function initProjectSaveAndSimulation(resultsData) {
             : null;
 
         const metrics = {
-            ...(resultsData.metrics || {}),
+            ...resultsData.metrics,
             overload_percent: Number((document.getElementById("ctrlOverloadPercentage")?.textContent || "0").replace("%", "")) || 0,
             overflow_passengers: Number(document.getElementById("ctrlTotalOverflowPassengers")?.textContent || "0") || 0,
             unused_capacity: Number(document.getElementById("ctrlUnusedCapacity")?.textContent || "0") || 0,
@@ -2062,7 +2062,7 @@ function initManualRouteEditor(resultsData) {
         const plannedCapacity = Math.max(
             1,
             Math.floor(capacity * (Number((settingsOverride || state.settings).occupancyPercent) / 100))
-                + (Boolean((settingsOverride || state.settings).overflowEnabled) ? Math.max(0, Number((settingsOverride || state.settings).overflowLimitPerBus) || 0) : 0)
+                + ((settingsOverride || state.settings).overflowEnabled ? Math.max(0, Number((settingsOverride || state.settings).overflowLimitPerBus) || 0) : 0)
         );
         const actualOccupancyPercent = roundTo((bus.total_students / capacity) * 100, 1);
         const plannedOccupancyPercent = roundTo((bus.total_students / plannedCapacity) * 100, 1);

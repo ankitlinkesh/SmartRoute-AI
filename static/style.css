@@ -1,4 +1,4 @@
-﻿:root {
+:root {
     --bg-top: #f3f8ff;
     --bg-bottom: #e8eff9;
     --panel: #ffffff;
@@ -802,7 +802,7 @@ th {
 }
 
 .upload-head h1 {
-    margin: 8px 0 8px;
+    margin: 8px 0;
     color: #f8fafc;
     font-size: 2.35rem;
     letter-spacing: -0.02em;
