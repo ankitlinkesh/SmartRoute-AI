@@ -6,11 +6,12 @@ import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from uuid import uuid4
 
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
-from flask import Flask, flash, render_template, request, jsonify, url_for
+from flask import Flask, flash, render_template, request, jsonify, url_for, send_file
 from sklearn.cluster import MiniBatchKMeans
 from sklearn.neighbors import BallTree
 from backend.utils.input_parsers import (
@@ -34,6 +35,11 @@ from backend.services.osrm_service import (
     get_osrm_table_block as service_get_osrm_table_block,
     get_osrm_table_matrix as service_get_osrm_table_matrix,
     osrm_get_json as service_osrm_get_json,
+)
+from backend.services.road_access import (
+    classify_nearest_road_cached,
+    load_road_access_cache,
+    save_road_access_cache,
 )
 from backend.diagnostics.route_quality import (
     apply_penalty as diagnostics_apply_penalty,
@@ -76,9 +82,10 @@ app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "smartroute-dev-secret")
 
 # Campus and scheduling configuration.
-COLLEGE_NAME = os.getenv("COLLEGE_NAME", "College Campus")
-COLLEGE_LAT = float(os.getenv("COLLEGE_LAT", "34.0689"))
-COLLEGE_LON = float(os.getenv("COLLEGE_LON", "-118.4452"))
+DEFAULT_CITY_NAME = os.getenv("CITY_NAME", os.getenv("DEFAULT_CITY_NAME", "Demo City"))
+COLLEGE_NAME = os.getenv("COLLEGE_NAME", os.getenv("CAMPUS_NAME", "Demo Campus (configure per project)"))
+COLLEGE_LAT = float(os.getenv("COLLEGE_LAT", os.getenv("CAMPUS_LAT", "13.0827")))
+COLLEGE_LON = float(os.getenv("COLLEGE_LON", os.getenv("CAMPUS_LON", "80.2707")))
 BASE_ARRIVAL_TIME = os.getenv("BASE_ARRIVAL_TIME", "08:30")
 ARRIVAL_STAGGER_MINUTES = int(os.getenv("ARRIVAL_STAGGER_MINUTES", "5"))
 FALLBACK_AVERAGE_SPEED_KMH = float(os.getenv("FALLBACK_AVERAGE_SPEED_KMH", "30"))
@@ -108,10 +115,16 @@ BUS_ACCESS_NEAR_SUPPORT_M = float(os.getenv("BUS_ACCESS_NEAR_SUPPORT_M", "160"))
 BUS_ACCESS_WIDE_SUPPORT_M = float(os.getenv("BUS_ACCESS_WIDE_SUPPORT_M", "360"))
 BUS_ACCESS_MIN_WALK_M = float(os.getenv("BUS_ACCESS_MIN_WALK_M", "150"))
 BUS_ACCESS_MAX_WALK_M = float(os.getenv("BUS_ACCESS_MAX_WALK_M", "2000"))
+OSM_ROAD_LOOKUP_ENABLED = os.getenv("OSM_ROAD_LOOKUP_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+OSM_OVERPASS_URL = os.getenv("OSM_OVERPASS_URL", "https://overpass-api.de/api/interpreter")
+OSM_ROAD_LOOKUP_TIMEOUT_SECONDS = int(os.getenv("OSM_ROAD_LOOKUP_TIMEOUT_SECONDS", "5"))
+OSM_ROAD_LOOKUP_RADIUS_M = int(os.getenv("OSM_ROAD_LOOKUP_RADIUS_M", "80"))
+OSM_ROAD_LOOKUP_MAX_MISSES = int(os.getenv("OSM_ROAD_LOOKUP_MAX_MISSES", "30"))
+OSM_ROAD_CACHE_PATH = Path("data") / "osm_road_cache.json"
 ROUTE_SHAPE_2OPT_MAX_PASSES = int(os.getenv("ROUTE_SHAPE_2OPT_MAX_PASSES", "2"))
 ROUTE_SHAPE_2OPT_MAX_SWAPS = int(os.getenv("ROUTE_SHAPE_2OPT_MAX_SWAPS", "48"))
 MTC_STOPS_PATH = Path("data") / "mtc_stops.csv"
-ASSIGNMENTS_CSV_PATH = Path("static") / "assignments.csv"
+ASSIGNMENT_EXPORTS_DIR = Path("static") / "generated_exports"
 PROJECTS_ROOT = Path("projects")
 FLEET_CSV_PATH = Path("data") / "bus_fleet.csv"
 FLEET_COLUMNS = [
@@ -205,6 +218,25 @@ def routing_policy_profile(policy_name: str) -> Dict[str, object]:
 def sanitize_project_name(project_name: str) -> str:
     """Sanitize project name for filesystem-safe folder names."""
     return util_sanitize_project_name(project_name)
+
+
+def parse_project_campus_config(form_data) -> Dict[str, object]:
+    """Parse project-level geography while preserving env-based defaults."""
+    city_name = str(form_data.get("city_name", DEFAULT_CITY_NAME)).strip() or DEFAULT_CITY_NAME
+    campus_name = str(form_data.get("campus_name", COLLEGE_NAME)).strip() or COLLEGE_NAME
+    try:
+        campus_lat = float(form_data.get("campus_lat", COLLEGE_LAT))
+        campus_lon = float(form_data.get("campus_lon", COLLEGE_LON))
+    except (TypeError, ValueError):
+        raise ValueError("Campus latitude and longitude must be valid coordinates.")
+    if not (-90 <= campus_lat <= 90 and -180 <= campus_lon <= 180):
+        raise ValueError("Campus latitude/longitude are out of range.")
+    return {
+        "city_name": city_name,
+        "campus_name": campus_name,
+        "campus_lat": campus_lat,
+        "campus_lon": campus_lon,
+    }
 
 
 def project_dir_for_name(project_name: str) -> Path:
@@ -718,6 +750,8 @@ def cluster_students_geographically(
 def assign_stop_corridors(
     stops_df: pd.DataFrame,
     corridor_count: int,
+    campus_lat: Optional[float] = None,
+    campus_lon: Optional[float] = None,
 ) -> pd.DataFrame:
     """Assign deterministic directional corridor ids for each stop."""
     stops = stops_df.copy()
@@ -726,8 +760,10 @@ def assign_stop_corridors(
         return stops
 
     corridor_count = max(CORRIDOR_SECTOR_MIN, min(CORRIDOR_SECTOR_MAX, int(corridor_count)))
-    dx = stops["lon"].astype(float) - float(COLLEGE_LON)
-    dy = stops["lat"].astype(float) - float(COLLEGE_LAT)
+    resolved_campus_lat = float(COLLEGE_LAT if campus_lat is None else campus_lat)
+    resolved_campus_lon = float(COLLEGE_LON if campus_lon is None else campus_lon)
+    dx = stops["lon"].astype(float) - resolved_campus_lon
+    dy = stops["lat"].astype(float) - resolved_campus_lat
     angles = np.arctan2(dy.to_numpy(dtype=float), dx.to_numpy(dtype=float))
     normalized = ((angles + math.pi) / (2.0 * math.pi)) % 1.0
     sectors = np.floor(normalized * corridor_count).astype(int)
@@ -741,6 +777,7 @@ def classify_stop_accessibility(
     stops_df: pd.DataFrame,
     stop_source: str,
     routing_profile: Optional[Dict[str, object]] = None,
+    warnings: Optional[List[str]] = None,
 ) -> pd.DataFrame:
     """Classify stop road suitability via lightweight deterministic heuristics."""
     stops = stops_df.copy()
@@ -783,6 +820,10 @@ def classify_stop_accessibility(
     bus_accessible: List[bool] = []
     dead_end_risk: List[float] = []
     road_suitability_score: List[float] = []
+    road_cache = load_road_access_cache(OSM_ROAD_CACHE_PATH) if OSM_ROAD_LOOKUP_ENABLED else {}
+    road_cache_dirty = False
+    road_lookup_misses = 0
+    road_lookup_disabled = not OSM_ROAD_LOOKUP_ENABLED
 
     for row_idx, (near_support, wide_support, nearest_km) in enumerate(zip(near_counts, wide_counts, nearest_stop_km)):
         source_type = str(stops.iloc[row_idx].get("stop_source_type", stop_source or "generated")).strip().lower()
@@ -798,15 +839,27 @@ def classify_stop_accessibility(
             road_suitability_score.append(1.0)
             continue
 
-        if source_type == "mtc":
-            if nearest_km > 0.9 and near_support <= 2:
-                cls = "residential"
-            elif wide_support >= 20:
-                cls = "primary"
-            elif wide_support >= 12:
-                cls = "secondary"
-            else:
-                cls = "tertiary"
+        osm_result = None
+        if source_type in {"generated", "projected", "500m", ""} and not road_lookup_disabled:
+            try:
+                osm_result = classify_nearest_road_cached(
+                    lat=float(stops.iloc[row_idx]["lat"]),
+                    lon=float(stops.iloc[row_idx]["lon"]),
+                    cache=road_cache,
+                    overpass_url=OSM_OVERPASS_URL,
+                    timeout_seconds=OSM_ROAD_LOOKUP_TIMEOUT_SECONDS,
+                    radius_m=OSM_ROAD_LOOKUP_RADIUS_M,
+                )
+                road_cache_dirty = road_cache_dirty or bool(osm_result)
+            except Exception:
+                road_lookup_misses += 1
+                if road_lookup_misses >= max(1, OSM_ROAD_LOOKUP_MAX_MISSES):
+                    road_lookup_disabled = True
+                    if warnings is not None:
+                        warnings.append("OSM road classification unavailable; generated stops used heuristic road access scoring.")
+
+        if osm_result:
+            cls = str(osm_result.get("road_class", "tertiary"))
         else:
             if near_support <= 2 and wide_support <= 4 and nearest_km > 0.28:
                 cls = "service/internal"
@@ -842,6 +895,12 @@ def classify_stop_accessibility(
     stops["bus_accessible"] = bus_accessible
     stops["dead_end_risk"] = dead_end_risk
     stops["road_suitability_score"] = road_suitability_score
+    if road_cache_dirty:
+        try:
+            save_road_access_cache(OSM_ROAD_CACHE_PATH, road_cache)
+        except Exception:
+            if warnings is not None:
+                warnings.append("OSM road cache could not be saved; routing continued with in-memory road classifications.")
     return stops
 
 
@@ -955,7 +1014,13 @@ def build_bus_accessible_stops(
 ) -> Tuple[pd.DataFrame, Dict[str, Dict]]:
     """Apply accessibility classification + projection + consolidation."""
     profile = routing_policy_profile(routing_policy_name)
-    classified = classify_stop_accessibility(students_df, stops_df, stop_source=stop_source, routing_profile=profile)
+    classified = classify_stop_accessibility(
+        students_df,
+        stops_df,
+        stop_source=stop_source,
+        routing_profile=profile,
+        warnings=warnings,
+    )
     default_walk_km = max(0.05, min(BUS_ACCESS_MAX_WALK_M / 1000.0, max(BUS_ACCESS_MAX_WALK_KM, BUS_ACCESS_MIN_WALK_M / 1000.0)))
     projected, projection_meta = project_stops_to_accessible_roads(
         classified,
@@ -1069,8 +1134,13 @@ def allocate_chunks_to_buses(
     bus_actual_capacity_by_number: Optional[Dict[int, int]] = None,
     default_actual_capacity: Optional[int] = None,
     routing_policy_name: str = DEFAULT_ROUTING_POLICY,
+    campus_lat: Optional[float] = None,
+    campus_lon: Optional[float] = None,
+    warnings: Optional[List[str]] = None,
 ) -> Tuple[List[Dict], Dict[int, Dict[str, str | int]]]:
     """Corridor-aware adaptive allocation with partial stop splitting."""
+    resolved_campus_lat = float(COLLEGE_LAT if campus_lat is None else campus_lat)
+    resolved_campus_lon = float(COLLEGE_LON if campus_lon is None else campus_lon)
     initial_numbers = preferred_bus_numbers or [i + 1 for i in range(requested_buses)]
     buses = [
         {
@@ -1107,10 +1177,11 @@ def allocate_chunks_to_buses(
     student_assignment_map: Dict[int, Dict[str, str | int]] = {}
     routing_profile = routing_policy_profile(routing_policy_name)
     road_penalty_by_class = dict(routing_profile.get("road_penalties", {}))
+    lane_fallback_stop_ids: set[str] = set()
 
     def bus_centroid(bus_obj: Dict) -> Tuple[float, float]:
         if not bus_obj["chunks"]:
-            return float(COLLEGE_LAT), float(COLLEGE_LON)
+            return resolved_campus_lat, resolved_campus_lon
         lat = float(np.mean([float(c["lat"]) for c in bus_obj["chunks"]]))
         lon = float(np.mean([float(c["lon"]) for c in bus_obj["chunks"]]))
         return lat, lon
@@ -1120,14 +1191,14 @@ def allocate_chunks_to_buses(
         stop_lat = float(stop_chunk["lat"])
         stop_lon = float(stop_chunk["lon"])
         distance_cost = haversine_km(centroid_lat, centroid_lon, stop_lat, stop_lon)
-        campus_cost = haversine_km(stop_lat, stop_lon, COLLEGE_LAT, COLLEGE_LON)
+        campus_cost = haversine_km(stop_lat, stop_lon, resolved_campus_lat, resolved_campus_lon)
         detour_cost = max(0.0, distance_cost - (0.45 * campus_cost))
         occupancy_penalty = (1.0 - (float(bus_obj["remaining_capacity"]) / max(1.0, float(bus_obj["capacity"])))) * 8.0
         projected_farthest = max(state["farthest_km"], campus_cost)
         route_stretch_penalty = max(0.0, projected_farthest - state["farthest_km"]) * 0.7
         corridor_bonus = corridor_alignment_score(str(stop_chunk.get("corridor", "")), state["corridor_counts"]) * 8.0
-        direction_alignment_bonus = max(0.0, 1.0 - abs(centroid_lon - COLLEGE_LON)) * 1.5
-        centroid_to_campus = haversine_km(centroid_lat, centroid_lon, COLLEGE_LAT, COLLEGE_LON)
+        direction_alignment_bonus = max(0.0, 1.0 - abs(centroid_lon - resolved_campus_lon)) * 1.5
+        centroid_to_campus = haversine_km(centroid_lat, centroid_lon, resolved_campus_lat, resolved_campus_lon)
         inward_progress_bonus = 1.8 if campus_cost <= centroid_to_campus + 0.45 else 0.0
         lateral_jump_penalty = max(0.0, distance_cost - max(0.25, abs(campus_cost - centroid_to_campus) + 0.25)) * 0.7
         road_class = str(stop_chunk.get("road_class", "tertiary"))
@@ -1167,7 +1238,7 @@ def allocate_chunks_to_buses(
             return True
         farthest_candidate = max(
             state["farthest_km"],
-            haversine_km(stop_lat, stop_lon, COLLEGE_LAT, COLLEGE_LON),
+            haversine_km(stop_lat, stop_lon, resolved_campus_lat, resolved_campus_lon),
         )
         baseline = max(0.5, state["farthest_km"])
         stretch_ratio = farthest_candidate / baseline
@@ -1175,7 +1246,7 @@ def allocate_chunks_to_buses(
             return True
         if bool(routing_profile.get("hard_directional", True)):
             tolerance = float(routing_profile.get("outward_tolerance_km", 0.15))
-            campus_cost = haversine_km(stop_lat, stop_lon, COLLEGE_LAT, COLLEGE_LON)
+            campus_cost = haversine_km(stop_lat, stop_lon, resolved_campus_lat, resolved_campus_lon)
             if state["farthest_km"] > 0 and campus_cost > float(state["farthest_km"]) + tolerance:
                 return True
         return False
@@ -1184,8 +1255,8 @@ def allocate_chunks_to_buses(
         return routing_refresh_bus_state(
             bus_obj,
             bus_states,
-            COLLEGE_LAT,
-            COLLEGE_LON,
+            resolved_campus_lat,
+            resolved_campus_lon,
             haversine_km,
         )
 
@@ -1225,6 +1296,8 @@ def allocate_chunks_to_buses(
             candidates = collect_candidates(allow_blocked_lanes=False)
             if not candidates:
                 candidates = collect_candidates(allow_blocked_lanes=True)
+                if candidates and lane_blocked(chunk):
+                    lane_fallback_stop_ids.add(str(chunk.get("base_stop_id", chunk.get("stop_id", ""))))
 
             if not candidates:
                 bus_number = next_bus_number
@@ -1270,12 +1343,18 @@ def allocate_chunks_to_buses(
                 "cluster_id": chunk.get("cluster_id"),
                 "corridor": str(chunk.get("corridor", "")),
                 "road_class": str(chunk.get("road_class", "tertiary")),
+                "stop_source_type": str(chunk.get("stop_source_type", "generated")),
+                "accessibility_verified": bool(chunk.get("accessibility_verified", False)),
                 "accessibility_type": str(chunk.get("accessibility_type", "accessible")),
                 "dead_end_risk": float(chunk.get("dead_end_risk", 0.0)),
                 "road_suitability_score": float(chunk.get("road_suitability_score", 0.7)),
                 "projected": bool(chunk.get("projected", False)),
+                "projected_stop": bool(chunk.get("projected_stop", chunk.get("projected", False))),
                 "projection_walk_km": float(chunk.get("projection_walk_km", 0.0)),
                 "walking_distance_m": float(chunk.get("walking_distance_m", 0.0)),
+                "original_stop_id": str(chunk.get("original_stop_id", chunk.get("base_stop_id", chunk["stop_id"]))),
+                "original_lat": float(chunk.get("original_lat", chunk.get("lat", 0.0))),
+                "original_lon": float(chunk.get("original_lon", chunk.get("lon", 0.0))),
             }
             selected_bus["chunks"].append(chunk_payload)
             selected_bus["remaining_capacity"] -= int(take_count)
@@ -1286,7 +1365,7 @@ def allocate_chunks_to_buses(
             selected_state["assigned_stops"].append(split_stop_id)
             selected_state["farthest_km"] = max(
                 float(selected_state["farthest_km"]),
-                haversine_km(float(chunk["lat"]), float(chunk["lon"]), COLLEGE_LAT, COLLEGE_LON),
+                haversine_km(float(chunk["lat"]), float(chunk["lon"]), resolved_campus_lat, resolved_campus_lon),
             )
 
             for idx in assigned_slice:
@@ -1348,6 +1427,12 @@ def allocate_chunks_to_buses(
         bus["primary_corridor"] = primary
         bus["served_corridors"] = sorted(final_corridor_counts.keys())
 
+    if warnings is not None:
+        for stop_id in sorted(lane_fallback_stop_ids):
+            warnings.append(
+                f"Routing policy fallback: stop {stop_id} used a restricted/narrow road because no feasible main-road bus assignment was available."
+            )
+
     return [bus for bus in buses if bus["chunks"]], student_assignment_map
 
 
@@ -1385,6 +1470,8 @@ def estimate_route_shape_cost(
     index_map: Dict[str, int],
     college_id: str,
     location_by_id: Dict[str, Dict],
+    campus_lat: Optional[float] = None,
+    campus_lon: Optional[float] = None,
 ) -> float:
     """Directional shape-aware cost: travel + backtrack/lateral/reversal penalties."""
     return routing_estimate_route_shape_cost(
@@ -1394,8 +1481,8 @@ def estimate_route_shape_cost(
         college_id,
         location_by_id,
         haversine_km,
-        COLLEGE_LAT,
-        COLLEGE_LON,
+        float(COLLEGE_LAT if campus_lat is None else campus_lat),
+        float(COLLEGE_LON if campus_lon is None else campus_lon),
     )
 
 
@@ -1405,6 +1492,8 @@ def refine_stop_order_directional(
     index_map: Dict[str, int],
     college_id: str,
     location_by_id: Dict[str, Dict],
+    campus_lat: Optional[float] = None,
+    campus_lon: Optional[float] = None,
 ) -> List[str]:
     """Bounded deterministic 2-opt style smoothing for inward directional continuity."""
     return routing_refine_stop_order_directional(
@@ -1414,8 +1503,8 @@ def refine_stop_order_directional(
         college_id,
         location_by_id,
         haversine_km,
-        COLLEGE_LAT,
-        COLLEGE_LON,
+        float(COLLEGE_LAT if campus_lat is None else campus_lat),
+        float(COLLEGE_LON if campus_lon is None else campus_lon),
         ROUTE_SHAPE_2OPT_MAX_PASSES,
         ROUTE_SHAPE_2OPT_MAX_SWAPS,
     )
@@ -1458,6 +1547,8 @@ def route_and_schedule_buses(
     max_ride_duration_minutes: Optional[int],
     stop_dwell_seconds: Optional[int],
     routing_policy_name: str = DEFAULT_ROUTING_POLICY,
+    campus_lat: Optional[float] = None,
+    campus_lon: Optional[float] = None,
 ) -> Tuple[List[Dict], float, float, float]:
     """Compute route order, pickup schedule, and per-bus metrics."""
     try:
@@ -1467,7 +1558,8 @@ def route_and_schedule_buses(
     location_by_id = {loc["id"]: loc for loc in route_locations}
     index_map = {loc["id"]: idx for idx, loc in enumerate(route_locations)}
     college_id = "COLLEGE"
-    routing_profile = routing_policy_profile(routing_policy_name)
+    resolved_campus_lat = float(COLLEGE_LAT if campus_lat is None else campus_lat)
+    resolved_campus_lon = float(COLLEGE_LON if campus_lon is None else campus_lon)
 
     routed_buses: List[Dict] = []
     total_distance_km = 0.0
@@ -1519,18 +1611,9 @@ def route_and_schedule_buses(
             index_map=index_map,
             college_id=college_id,
             location_by_id=location_by_id,
+            campus_lat=resolved_campus_lat,
+            campus_lon=resolved_campus_lon,
         )
-        if bool(routing_profile.get("hard_directional", True)):
-            pickup_order_ids = sorted(
-                pickup_order_ids,
-                key=lambda sid: haversine_km(
-                    float(location_by_id[sid]["lat"]),
-                    float(location_by_id[sid]["lon"]),
-                    COLLEGE_LAT,
-                    COLLEGE_LON,
-                ),
-                reverse=True,
-            )
 
         route_order = pickup_order_ids + [college_id]
 
@@ -1594,11 +1677,18 @@ def route_and_schedule_buses(
                 "lon": stop_info["lon"],
                 "corridor": str(stop_info.get("corridor", "")),
                 "road_class": str(stop_info.get("road_class", "tertiary")),
+                "stop_source_type": str(stop_info.get("stop_source_type", "generated")),
+                "accessibility_verified": bool(stop_info.get("accessibility_verified", False)),
                 "accessibility_type": str(stop_info.get("accessibility_type", "accessible")),
                 "projected_stop": bool(stop_info.get("projected", False)),
                 "walking_distance_m": float(stop_info.get("walking_distance_m", 0.0)),
                 "road_suitability_score": float(stop_info.get("road_suitability_score", 0.7)),
                 "base_stop_id": str(stop_info.get("base_stop_id", stop_id)),
+                "original_stop_id": str(stop_info.get("original_stop_id", stop_info.get("base_stop_id", stop_id))),
+                "original_coordinates": {
+                    "lat": float(stop_info.get("original_lat", stop_info.get("lat", 0.0))),
+                    "lon": float(stop_info.get("original_lon", stop_info.get("lon", 0.0))),
+                },
                 "students_count": students_count,
                 "pickup_time": pickup_times[stop_id],
                 "pickup_window": format_pickup_window(pickup_times[stop_id]),
@@ -1705,6 +1795,8 @@ def route_quality_metrics(
     assigned_students_df: pd.DataFrame,
     bus_capacity: int,
     max_ride_duration_minutes: Optional[int] = None,
+    campus_lat: Optional[float] = None,
+    campus_lon: Optional[float] = None,
 ) -> Tuple[List[str], Dict]:
     """Compute per-bus and global quality diagnostics for optimized routes."""
     return diagnostics_route_quality_metrics(
@@ -1713,12 +1805,35 @@ def route_quality_metrics(
         bus_capacity,
         max_ride_duration_minutes,
         haversine_km,
-        COLLEGE_LAT,
-        COLLEGE_LON,
+        float(COLLEGE_LAT if campus_lat is None else campus_lat),
+        float(COLLEGE_LON if campus_lon is None else campus_lon),
         segment_overlap_score,
         summarize_health_state,
         apply_penalty,
     )
+
+
+def build_operational_route_warnings(routed_buses: List[Dict]) -> List[str]:
+    """Generate actionable road-access diagnostics without changing routes."""
+    warnings: List[str] = []
+    projected_count = 0
+    long_walk_count = 0
+    restricted_count = 0
+    for bus in routed_buses:
+        for stop in bus.get("ordered_stops", []):
+            if bool(stop.get("projected_stop", False)):
+                projected_count += 1
+            if float(stop.get("walking_distance_m", 0.0)) > BUS_ACCESS_MAX_WALK_M:
+                long_walk_count += 1
+            if str(stop.get("road_class", "")).strip().lower() in {"residential", "service/internal"}:
+                restricted_count += 1
+    if projected_count:
+        warnings.append(f"{projected_count} pickup stop(s) were consolidated/projected to bus-accessible points.")
+    if long_walk_count:
+        warnings.append(f"{long_walk_count} pickup stop(s) exceed the configured walking-distance guideline.")
+    if restricted_count:
+        warnings.append(f"{restricted_count} pickup stop(s) still use residential/internal road classes; review strict main-road feasibility.")
+    return warnings
 
 
 def build_assignments_and_stops_dict(
@@ -1778,9 +1893,10 @@ def build_assignments_and_stops_dict(
     return assignments, stops_dict
 
 
-def write_assignments_csv(assignments: List[Dict]) -> None:
-    """Write assignment export to static/assignments.csv."""
-    ASSIGNMENTS_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
+def write_assignments_csv(assignments: List[Dict], export_path: Optional[Path] = None) -> Path:
+    """Write assignment export to a run/project-scoped CSV path."""
+    target_path = export_path or (ASSIGNMENT_EXPORTS_DIR / f"assignments_{uuid4().hex}.csv")
+    target_path.parent.mkdir(parents=True, exist_ok=True)
     export_rows = [
         {
             "student_name": item["student_name"],
@@ -1794,7 +1910,8 @@ def write_assignments_csv(assignments: List[Dict]) -> None:
     pd.DataFrame(
         export_rows,
         columns=STUDENT_EXPORT_COLUMNS,
-    ).to_csv(ASSIGNMENTS_CSV_PATH, index=False)
+    ).to_csv(target_path, index=False)
+    return target_path
 
 
 def write_driver_sheets(project_path: Path, buses: List[Dict], assignments: List[Dict]) -> None:
@@ -1813,6 +1930,7 @@ def simulate_routes(
     max_ride_duration_minutes: Optional[int] = DEFAULT_MAX_RIDE_DURATION_MINUTES,
     stop_dwell_seconds: Optional[int] = DEFAULT_STOP_DWELL_SECONDS,
     per_bus_actual_capacities: Optional[Dict[int, int]] = None,
+    routing_policy_name: str = DEFAULT_ROUTING_POLICY,
 ) -> Dict:
     """Run lightweight scenario simulation on cloned route state."""
     return simulation_simulate_routes(
@@ -1826,6 +1944,7 @@ def simulate_routes(
         max_ride_duration_minutes=max_ride_duration_minutes,
         stop_dwell_seconds=stop_dwell_seconds,
         per_bus_actual_capacities=per_bus_actual_capacities,
+        routing_policy_name=normalize_routing_policy(routing_policy_name),
     )
 
 
@@ -1842,10 +1961,18 @@ def optimize_routes(
     stop_dwell_seconds: Optional[int] = DEFAULT_STOP_DWELL_SECONDS,
     per_bus_actual_capacities: Optional[Dict[int, int]] = None,
     routing_policy_name: str = DEFAULT_ROUTING_POLICY,
+    city_name: str = DEFAULT_CITY_NAME,
+    campus_name: str = COLLEGE_NAME,
+    campus_lat: float = COLLEGE_LAT,
+    campus_lon: float = COLLEGE_LON,
 ) -> Dict:
     """Run complete optimization pipeline with OSRM first and fallback on failure."""
     warnings: List[str] = []
     routing_policy_name = normalize_routing_policy(routing_policy_name)
+    city_name = str(city_name or DEFAULT_CITY_NAME)
+    campus_name = str(campus_name or COLLEGE_NAME)
+    campus_lat = float(campus_lat)
+    campus_lon = float(campus_lon)
     capacity_profile = build_capacity_profile(
         bus_capacity=bus_capacity,
         occupancy_percent=occupancy_percent,
@@ -1875,7 +2002,12 @@ def optimize_routes(
         CORRIDOR_SECTOR_MIN,
         min(CORRIDOR_SECTOR_MAX, max(1, required_buses_with_current_capacity)),
     )
-    stops_df = assign_stop_corridors(stops_df, corridor_count=corridor_count)
+    stops_df = assign_stop_corridors(
+        stops_df,
+        corridor_count=corridor_count,
+        campus_lat=campus_lat,
+        campus_lon=campus_lon,
+    )
     stops_df, projection_meta = build_bus_accessible_stops(
         students_df=clustered_students_df,
         stops_df=stops_df,
@@ -1940,6 +2072,9 @@ def optimize_routes(
         bus_actual_capacity_by_number=effective_actual_capacities,
         default_actual_capacity=int(bus_capacity),
         routing_policy_name=routing_policy_name,
+        campus_lat=campus_lat,
+        campus_lon=campus_lon,
+        warnings=warnings,
     )
     if student_assignment_map:
         assigned_students_df["stop_id"] = assigned_students_df.index.map(
@@ -1980,9 +2115,9 @@ def optimize_routes(
     route_locations.append(
         {
             "id": "COLLEGE",
-            "name": COLLEGE_NAME,
-            "lat": COLLEGE_LAT,
-            "lon": COLLEGE_LON,
+            "name": campus_name,
+            "lat": campus_lat,
+            "lon": campus_lon,
         }
     )
 
@@ -1997,20 +2132,25 @@ def optimize_routes(
         max_ride_duration_minutes=max_ride_duration_minutes,
         stop_dwell_seconds=stop_dwell_seconds,
         routing_policy_name=routing_policy_name,
+        campus_lat=campus_lat,
+        campus_lon=campus_lon,
     )
     quality_warnings, quality_metrics = route_quality_metrics(
         routed_buses=routed_buses,
         assigned_students_df=assigned_students_df,
         bus_capacity=bus_capacity,
         max_ride_duration_minutes=max_ride_duration_minutes,
+        campus_lat=campus_lat,
+        campus_lon=campus_lon,
     )
     warnings.extend(quality_warnings)
+    warnings.extend(build_operational_route_warnings(routed_buses))
 
     assignments, stops_dict = build_assignments_and_stops_dict(
         assigned_students_df=assigned_students_df,
         routed_buses=routed_buses,
     )
-    write_assignments_csv(assignments)
+    assignment_csv_path = write_assignments_csv(assignments)
 
     return {
         "buses": routed_buses,
@@ -2035,6 +2175,12 @@ def optimize_routes(
         else 0,
         "base_arrival_time": base_arrival_time,
         "routing_policy": routing_policy_name,
+        "city_name": city_name,
+        "campus_name": campus_name,
+        "campus_lat": campus_lat,
+        "campus_lon": campus_lon,
+        "assignment_csv_url": "/" + assignment_csv_path.as_posix(),
+        "assignment_csv_path": str(assignment_csv_path),
         "quality_metrics": quality_metrics,
         "max_ride_duration_minutes": None if max_ride_duration_minutes is None else int(max_ride_duration_minutes),
         "stop_dwell_seconds": None if stop_dwell_seconds is None else int(stop_dwell_seconds),
@@ -2073,6 +2219,10 @@ def upload():
     stop_dwell_seconds_value = str(DEFAULT_STOP_DWELL_SECONDS)
     per_bus_capacities_value = ""
     routing_policy_value = DEFAULT_ROUTING_POLICY
+    city_name_value = DEFAULT_CITY_NAME
+    campus_name_value = COLLEGE_NAME
+    campus_lat_value = str(COLLEGE_LAT)
+    campus_lon_value = str(COLLEGE_LON)
 
     def render_upload_form() -> str:
         return render_template(
@@ -2089,6 +2239,10 @@ def upload():
             per_bus_capacities_value=per_bus_capacities_value,
             routing_policy_value=routing_policy_value,
             routing_policy_options=ROUTING_POLICY_OPTIONS,
+            city_name_value=city_name_value,
+            campus_name_value=campus_name_value,
+            campus_lat_value=campus_lat_value,
+            campus_lon_value=campus_lon_value,
         )
 
     if request.method == "POST":
@@ -2112,6 +2266,11 @@ def upload():
             stop_dwell_seconds_value = str(request.form.get("stop_dwell_seconds", DEFAULT_STOP_DWELL_SECONDS)).strip()
             per_bus_capacities_value = str(request.form.get("per_bus_capacities", "")).strip()
             routing_policy_value = normalize_routing_policy(request.form.get("routing_policy", DEFAULT_ROUTING_POLICY))
+            campus_config = parse_project_campus_config(request.form)
+            city_name_value = str(campus_config["city_name"])
+            campus_name_value = str(campus_config["campus_name"])
+            campus_lat_value = str(campus_config["campus_lat"])
+            campus_lon_value = str(campus_config["campus_lon"])
             per_bus_capacity_map = parse_per_bus_capacities(per_bus_capacities_value)
             max_ride_duration_minutes = parse_optional_constraint_input(
                 raw_value=max_ride_duration_value,
@@ -2149,6 +2308,10 @@ def upload():
                 stop_dwell_seconds=stop_dwell_seconds,
                 per_bus_actual_capacities=per_bus_capacity_map,
                 routing_policy_name=routing_policy_value,
+                city_name=city_name_value,
+                campus_name=campus_name_value,
+                campus_lat=float(campus_lat_value),
+                campus_lon=float(campus_lon_value),
             )
             for warning in upload_summary["warnings"]:
                 flash(warning, "warning")
@@ -2157,9 +2320,9 @@ def upload():
 
             map_data = {
                 "college": {
-                    "name": COLLEGE_NAME,
-                    "lat": COLLEGE_LAT,
-                    "lon": COLLEGE_LON,
+                    "name": result["campus_name"],
+                    "lat": result["campus_lat"],
+                    "lon": result["campus_lon"],
                 },
                 "buses": [
                     {
@@ -2180,7 +2343,11 @@ def upload():
                 average_travel_distance=result["average_travel_distance"],
                 average_travel_duration=result["average_travel_duration"],
                 total_candidate_stops=result["total_candidate_stops"],
-                college_name=COLLEGE_NAME,
+                college_name=result["campus_name"],
+                city_name=result["city_name"],
+                campus_name=result["campus_name"],
+                campus_lat=result["campus_lat"],
+                campus_lon=result["campus_lon"],
                 matrix_source=result["matrix_source"],
                 stop_source=result["stop_source"],
                 warnings=result["warnings"],
@@ -2199,6 +2366,7 @@ def upload():
                 configured_stop_dwell_seconds=result["stop_dwell_seconds"],
                 configured_per_bus_capacities=result["per_bus_actual_capacities"],
                 configured_routing_policy=result["routing_policy"],
+                assignments_csv_url=result["assignment_csv_url"],
                 routing_policy_options=ROUTING_POLICY_OPTIONS,
                 configured_max_ride_duration_label=format_constraint_for_display(
                     result["max_ride_duration_minutes"], "min"
@@ -2232,6 +2400,10 @@ def results_page():
         average_travel_duration=0,
         total_candidate_stops=0,
         college_name=COLLEGE_NAME,
+        city_name=DEFAULT_CITY_NAME,
+        campus_name=COLLEGE_NAME,
+        campus_lat=COLLEGE_LAT,
+        campus_lon=COLLEGE_LON,
         matrix_source="osrm",
         stop_source=DEFAULT_STOP_SOURCE,
         warnings=[],
@@ -2265,6 +2437,7 @@ def results_page():
         configured_stop_dwell_seconds=DEFAULT_STOP_DWELL_SECONDS,
         configured_per_bus_capacities={},
         configured_routing_policy=DEFAULT_ROUTING_POLICY,
+        assignments_csv_url="#",
         routing_policy_options=ROUTING_POLICY_OPTIONS,
         configured_max_ride_duration_label=format_constraint_for_display(
             DEFAULT_MAX_RIDE_DURATION_MINUTES, "min"
@@ -2413,6 +2586,21 @@ def load_project(project_name: str):
         config.get("stop_dwell_seconds", DEFAULT_STOP_DWELL_SECONDS),
         DEFAULT_STOP_DWELL_SECONDS,
     )
+    loaded_city_name = str(config.get("city_name", DEFAULT_CITY_NAME))
+    loaded_campus_name = str(config.get("campus_name", config.get("college_name", COLLEGE_NAME)))
+    loaded_campus_lat = float(config.get("campus_lat", COLLEGE_LAT))
+    loaded_campus_lon = float(config.get("campus_lon", COLLEGE_LON))
+    loaded_map_data = routes.get(
+        "map_data",
+        {"college": {"name": loaded_campus_name, "lat": loaded_campus_lat, "lon": loaded_campus_lon}, "buses": [], "stops_dict": {}},
+    )
+    if isinstance(loaded_map_data, dict):
+        loaded_map_data["college"] = {
+            **(loaded_map_data.get("college", {}) or {}),
+            "name": loaded_campus_name,
+            "lat": loaded_campus_lat,
+            "lon": loaded_campus_lon,
+        }
 
     return render_template(
         "results.html",
@@ -2422,11 +2610,15 @@ def load_project(project_name: str):
         average_travel_distance=metrics.get("average_travel_distance", 0),
         average_travel_duration=metrics.get("average_travel_duration", 0),
         total_candidate_stops=metrics.get("total_candidate_stops", 0),
-        college_name=COLLEGE_NAME,
+        college_name=loaded_campus_name,
+        city_name=loaded_city_name,
+        campus_name=loaded_campus_name,
+        campus_lat=loaded_campus_lat,
+        campus_lon=loaded_campus_lon,
         matrix_source=metrics.get("matrix_source", "osrm"),
         stop_source=metrics.get("stop_source", DEFAULT_STOP_SOURCE),
         warnings=routes.get("warnings", []),
-        map_data=routes.get("map_data", {"college": {"name": COLLEGE_NAME, "lat": COLLEGE_LAT, "lon": COLLEGE_LON}, "buses": [], "stops_dict": {}}),
+        map_data=loaded_map_data,
         routes_per_page=ROUTES_PER_PAGE,
         assignments=payload["assignments"],
         configured_bus_capacity=int(config.get("bus_capacity", 0)),
@@ -2460,6 +2652,7 @@ def load_project(project_name: str):
         configured_stop_dwell_seconds=configured_stop_dwell_seconds,
         configured_per_bus_capacities=config.get("per_bus_actual_capacities", {}),
         configured_routing_policy=normalize_routing_policy(config.get("routing_policy", DEFAULT_ROUTING_POLICY)),
+        assignments_csv_url=url_for("download_project_assignments", project_name=project_path.name),
         routing_policy_options=ROUTING_POLICY_OPTIONS,
         configured_max_ride_duration_label=format_constraint_for_display(
             configured_max_ride_duration, "min"
@@ -2478,6 +2671,16 @@ def load_project(project_name: str):
         project_meta={"project_name": project_path.name},
         manual_plan_state=routes.get("manual_plan_state", {}),
     )
+
+
+@app.route("/projects/<project_name>/assignments.csv", methods=["GET"])
+def download_project_assignments(project_name: str):
+    project_path = project_dir_for_name(project_name)
+    assignments_path = project_path / "assignments.csv"
+    if not assignments_path.exists():
+        flash("Assignments export not found for this project.", "error")
+        return render_template("projects.html", projects=project_cards()), 404
+    return send_file(assignments_path, as_attachment=True, download_name="assignments.csv")
 
 
 @app.route("/api/projects/save", methods=["POST"])
@@ -2504,6 +2707,7 @@ def api_save_project():
     config_state = payload.get("config_state", {})
     simulation_state = payload.get("simulation_state", {})
     manual_plan_state = payload.get("manual_plan_state", {})
+    map_college = (map_data.get("college", {}) if isinstance(map_data, dict) else {}) or {}
     persistence_write_project_artifacts(
         project_path=project_path,
         sanitized_name=sanitized_name,
@@ -2525,6 +2729,10 @@ def api_save_project():
             ),
             "arrival_time": str(config_state.get("arrival_time", BASE_ARRIVAL_TIME)),
             "routing_policy": normalize_routing_policy(config_state.get("routing_policy", DEFAULT_ROUTING_POLICY)),
+            "city_name": str(config_state.get("city_name", DEFAULT_CITY_NAME)),
+            "campus_name": str(config_state.get("campus_name", map_college.get("name", COLLEGE_NAME))),
+            "campus_lat": float(config_state.get("campus_lat", map_college.get("lat", COLLEGE_LAT))),
+            "campus_lon": float(config_state.get("campus_lon", map_college.get("lon", COLLEGE_LON))),
         },
         simulation_state=simulation_state,
         manual_plan_state=manual_plan_state,
@@ -2570,6 +2778,7 @@ def api_simulate():
             for k, v in (payload.get("per_bus_actual_capacities", {}) or {}).items()
             if str(k).strip()
         },
+        routing_policy_name=normalize_routing_policy(payload.get("routing_policy", DEFAULT_ROUTING_POLICY)),
     )
     return jsonify({"ok": True, "result": result})
 

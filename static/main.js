@@ -180,7 +180,16 @@ function initProjectSaveAndSimulation(resultsData) {
                 max_ride_duration_minutes: normalizeConstraintValue(resultsData.configuredMaxRideDuration, 120),
                 stop_dwell_seconds: normalizeConstraintValue(resultsData.configuredStopDwellSeconds, 20),
                 routing_policy: String(resultsData.configuredRoutingPolicy || "balanced"),
+                city_name: String(resultsData.cityName || ""),
+                campus_name: String(resultsData.campusName || resultsData.collegeName || ""),
+                campus_lat: Number(resultsData.campusLat || resultsData.mapData?.college?.lat || 0),
+                campus_lon: Number(resultsData.campusLon || resultsData.mapData?.college?.lon || 0),
             };
+        configState.city_name = String(configState.city_name || resultsData.cityName || "");
+        configState.campus_name = String(configState.campus_name || resultsData.campusName || resultsData.collegeName || "");
+        configState.campus_lat = Number(configState.campus_lat || resultsData.campusLat || resultsData.mapData?.college?.lat || 0);
+        configState.campus_lon = Number(configState.campus_lon || resultsData.campusLon || resultsData.mapData?.college?.lon || 0);
+        configState.routing_policy = String(configState.routing_policy || resultsData.configuredRoutingPolicy || "balanced");
 
         const shouldOverwrite = Boolean(
             overwrite || (overwriteBtn && !overwriteBtn.hidden && conflictProjectName === projectName)
@@ -320,7 +329,9 @@ function initProjectSaveAndSimulation(resultsData) {
                 }
 
                 const sim = body.result.metrics || {};
-                const simulatedRoutes = (snapshot.buses || []).filter((bus) => !disabled.includes(Number(bus.bus_number)));
+                const simulatedRoutes = Array.isArray(body.result.routes)
+                    ? body.result.routes
+                    : (snapshot.buses || []).filter((bus) => !disabled.includes(Number(bus.bus_number)));
                 const simulationSettings = {
                     occupancyPercent: Number(simOccupancy?.value || 90),
                     overflowEnabled: Boolean(simOverflowToggle?.checked),

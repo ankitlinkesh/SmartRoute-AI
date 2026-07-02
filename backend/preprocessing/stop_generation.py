@@ -108,7 +108,6 @@ def build_stops_for_source(
     if stop_source == "mtc":
         try:
             mtc_stops_df = load_mtc_stops(mtc_stops_path)
-            print("Loaded MTC stops:", len(mtc_stops_df))
             return mtc_stops_df[
                 [
                     "stop_id",
@@ -124,12 +123,10 @@ def build_stops_for_source(
                 ]
             ], "mtc"
         except FileNotFoundError:
-            print("Falling back to 500m mode")
             warnings.append(
                 "MTC stop dataset not found. Falling back to 500m generated stops."
             )
         except Exception:
-            print("Falling back to 500m mode")
             warnings.append(
                 "Invalid MTC stop dataset. Using generated stops instead."
             )

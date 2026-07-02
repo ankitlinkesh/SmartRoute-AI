@@ -32,7 +32,7 @@
                 <p class="subtitle">Road-aware OSRM routing and pickup scheduling</p>
             </div>
             <div class="header-actions">
-                <a class="btn btn-brand" href="/static/assignments.csv" download>Download Assignments CSV</a>
+                <a class="btn btn-brand" href="{{ assignments_csv_url }}" download>Download Assignments CSV</a>
                 <a class="btn btn-brand-soft" href="{{ url_for('upload') }}">Optimize Again</a>
                 <a class="btn btn-outline-cyan" href="{{ url_for('fleet_page') }}">Fleet Management</a>
                 <a class="btn btn-outline-slate" href="{{ url_for('projects_page') }}">Load Project</a>
@@ -405,6 +405,10 @@
             assignments: {{ assignments | tojson }},
             routesPerPage: {{ routes_per_page | tojson }},
             collegeName: {{ college_name | tojson }},
+            cityName: {{ city_name | default("", true) | tojson }},
+            campusName: {{ campus_name | default(college_name, true) | tojson }},
+            campusLat: {{ campus_lat | default(0, true) | tojson }},
+            campusLon: {{ campus_lon | default(0, true) | tojson }},
             configuredBusCapacity: {{ configured_bus_capacity | tojson }},
             configuredPerBusCapacities: {{ configured_per_bus_capacities | tojson }},
             configuredRoutingPolicy: {{ configured_routing_policy | tojson }},

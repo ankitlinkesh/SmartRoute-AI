@@ -39,6 +39,8 @@ Thumbs.db
 # Project runtime artifacts
 projects/
 static/assignments.csv
+static/generated_exports/
+data/osm_road_cache.json
 
 # Generated data exports
 *.tmp

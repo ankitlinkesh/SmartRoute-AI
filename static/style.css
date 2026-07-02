@@ -833,12 +833,25 @@ th {
     gap: 12px;
 }
 
+.upload-two-col {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+}
+
+.upload-two-col label {
+    display: grid;
+    gap: 8px;
+}
+
 .upload-form-card label {
     color: #dbeafe;
     font-weight: 600;
 }
 
 .upload-form-card input[type="file"],
+.upload-form-card input[type="text"],
+.upload-form-card input[type="time"],
 .upload-form-card input[type="number"],
 .upload-form-card select {
     border: 1px solid rgba(71, 85, 105, 0.75);
@@ -985,6 +998,10 @@ th {
 
     .upload-head h1 {
         font-size: 1.9rem;
+    }
+
+    .upload-two-col {
+        grid-template-columns: 1fr;
     }
 }
 

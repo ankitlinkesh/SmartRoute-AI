@@ -39,6 +39,25 @@ def write_project_artifacts(
     config_json = {
         "project_name": sanitized_name,
         "saved_at": datetime.utcnow().isoformat() + "Z",
+        "city_name": str(config_state.get("city_name", "")),
+        "campus_name": str(
+            config_state.get("campus_name")
+            or config_state.get("college_name")
+            or (map_data.get("college", {}) if isinstance(map_data, dict) else {}).get("name", "")
+        ),
+        "campus_lat": float(
+            config_state.get(
+                "campus_lat",
+                (map_data.get("college", {}) if isinstance(map_data, dict) else {}).get("lat", 0.0),
+            )
+        ),
+        "campus_lon": float(
+            config_state.get(
+                "campus_lon",
+                (map_data.get("college", {}) if isinstance(map_data, dict) else {}).get("lon", 0.0),
+            )
+        ),
+        "routing_policy": str(config_state.get("routing_policy", "balanced")),
         "occupancy_percent": int(config_state.get("occupancy_percent", 90)),
         "overflow_enabled": bool(config_state.get("overflow_enabled", False)),
         "overflow_limit": int(config_state.get("overflow_limit", 0)),
@@ -95,4 +114,3 @@ def write_project_artifacts(
         ),
     }
     (project_path / "metrics.json").write_text(json.dumps(metrics_json, indent=2), encoding="utf-8")
-
